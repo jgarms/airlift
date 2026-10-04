@@ -20,9 +20,10 @@ final class RendererOutput {
     private let prerollFrames: Int
     private let chunkFrames = 4800
 
-    init(format: AVAudioFormat, bufferSeconds: Double = 4.0, prerollSeconds: Double = 0.5) {
+    /// Pass `ring` to render from a buffer that outlives this renderer.
+    init(format: AVAudioFormat, ring: RingBuffer? = nil, bufferSeconds: Double = 4.0, prerollSeconds: Double = 0.5) {
         self.format = format
-        self.ring = RingBuffer(
+        self.ring = ring ?? RingBuffer(
             channelCount: Int(format.channelCount),
             capacityFrames: Int(format.sampleRate * bufferSeconds)
         )
@@ -122,6 +123,7 @@ final class RendererOutput {
     func stop() {
         timer?.cancel()
         timer = nil
+        queue.sync {}  // let an in-flight pump finish before the ring is reused
         synchronizer.setRate(0, time: .zero)
         renderer.stopRequestingMediaData()
         renderer.flush()

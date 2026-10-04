@@ -22,7 +22,11 @@ Why the picker instead of programmatic selection: enumerating AirPlay devices
 (`AVOutputDeviceDiscoverySession`) is gated by the Apple-restricted
 `com.apple.avfoundation.allows-access-to-device-list` entitlement — unentitled
 apps get an empty device list while the daemon happily discovers on their
-behalf. The picker sidesteps the gate with native UI.
+behalf. Selecting is gated too: `-[AVOutputContext setOutputDevices:]` from an
+unentitled process fails with `-12023`, even with live device objects taken
+from an already-routed context, and MediaRemote's discovery sessions also come
+back empty. The picker sidesteps both gates with native UI, which is also why
+its list can't be filtered to HomePods or pre-selected.
 
 > ⚠️ This uses private API (`AVOutputContext`, route-picker SPI) resolved at
 > runtime. It's for personal use; expect breakage on OS updates.
@@ -34,9 +38,15 @@ Scripts/make-app.sh     # swift build + wraps build/Airlift.app (ad-hoc signed)
 open build/Airlift.app
 ```
 
-Menu bar (AirPlay icon, with a dot while streaming): **Choose Speakers…** opens the native AirPlay picker
-(AirPlay 2 speakers multi-select), **Stream From** picks the source app,
-**Start Streaming** taps it. Approve the Local Network and audio-capture
+Airlift streams automatically: on launch it asks for speakers (the native
+AirPlay picker, AirPlay 2 speakers multi-select), then starts streaming
+whenever the source app plays and stops when it goes quiet. Quit Airlift to
+play locally again.
+
+Menu bar (AirPlay icon, full-strength while streaming, dimmed while idle):
+**Choose Speakers…** reopens the picker, **Pause Airlift** suspends streaming
+until resumed, **Stream From** picks the source app, **Launch at Login**
+registers the app as a login item. Approve the Local Network and audio-capture
 permission prompts on first use.
 
 The same binary is also a CLI:
@@ -53,11 +63,18 @@ Logs: `~/Library/Logs/airlift.log`.
 
 ## Behavior notes
 
-- A reconcile loop re-taps automatically when the source app quits/relaunches
-  and restarts a failed renderer; dropped routes get a best-effort re-attach.
-- Speaker picks don't survive an app restart (the OS rehydrates a saved
-  context with the wrong type, which would break the picker) — re-pick after
-  relaunching Airlift.
+- The tap (which mutes the source app locally) stays up while the source app
+  runs and speakers are selected. The renderer only exists while the app is
+  audible: the first audible buffer starts it, 30 s of silence stops it and
+  releases the speakers.
+- With no speakers selected Airlift leaves the source app alone, so it plays
+  locally as usual.
+- A reconcile loop (2 s tick, plus app launch/quit, Core Audio process-list
+  and route-change events) re-taps when the source app quits/relaunches and
+  restarts a failed renderer.
+- Speaker picks don't survive an app restart (the route lives on a context
+  that dies with the process, and can't be re-selected programmatically) —
+  Airlift opens the picker on launch.
 - Expect ~2 s of AirPlay latency; source-app volume applies upstream of the
   stream, per-speaker volume via the picker/Home app.
 

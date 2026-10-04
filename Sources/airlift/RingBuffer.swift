@@ -44,6 +44,11 @@ final class RingBuffer: @unchecked Sendable {
         writeIndex.store(w + frameCount)
     }
 
+    /// Discards buffered frames. Only safe while neither side is running.
+    func reset() {
+        readIndex.store(writeIndex.load())
+    }
+
     /// Reads up to frameCount interleaved frames; zero-fills the remainder.
     /// Returns the number of real frames delivered.
     @discardableResult
