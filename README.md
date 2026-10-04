@@ -38,10 +38,10 @@ Scripts/make-app.sh     # swift build + wraps build/Airlift.app (ad-hoc signed)
 open build/Airlift.app
 ```
 
-Airlift streams automatically: on launch it asks for speakers (the native
-AirPlay picker, AirPlay 2 speakers multi-select), then starts streaming
-whenever the source app plays and stops when it goes quiet. Quit Airlift to
-play locally again.
+Airlift streams automatically: it starts streaming whenever the source app
+plays and stops when it goes quiet. If no speakers are selected when playback
+starts, it pops up the native AirPlay picker (AirPlay 2 speakers
+multi-select). Quit Airlift to play locally again.
 
 Menu bar (AirPlay icon, full-strength while streaming, dimmed while idle):
 **Choose Speakers…** reopens the picker, **Pause Airlift** suspends streaming
@@ -67,14 +67,15 @@ Logs: `~/Library/Logs/airlift.log`.
   runs and speakers are selected. The renderer only exists while the app is
   audible: the first audible buffer starts it, 30 s of silence stops it and
   releases the speakers.
-- With no speakers selected Airlift leaves the source app alone, so it plays
-  locally as usual.
+- With no speakers selected the tap only listens: the source app plays
+  locally as usual, and the picker opens when it starts playing (once per
+  stretch of playback).
 - A reconcile loop (2 s tick, plus app launch/quit, Core Audio process-list
   and route-change events) re-taps when the source app quits/relaunches and
   restarts a failed renderer.
 - Speaker picks don't survive an app restart (the route lives on a context
   that dies with the process, and can't be re-selected programmatically) —
-  Airlift opens the picker on launch.
+  Airlift asks again the next time the source app plays.
 - Expect ~2 s of AirPlay latency; source-app volume applies upstream of the
   stream, per-speaker volume via the picker/Home app.
 

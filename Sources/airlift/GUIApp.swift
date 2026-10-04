@@ -77,10 +77,11 @@ final class AudioGate: @unchecked Sendable {
 }
 
 /// Owns the tap → renderer pipeline and reconciles it against the desired
-/// state on every tick. The tap (which mutes the app locally) stays up while
-/// the source app runs and speakers are selected; the renderer only exists
-/// while the app is actually producing sound, so speakers are released when
-/// playback stops.
+/// state on every tick. The tap stays up while the source app runs; the
+/// renderer only exists while the app is actually producing sound, so
+/// speakers are released when playback stops. With no speakers selected the
+/// tap only listens (the app keeps playing locally) so the user can be asked
+/// for speakers the moment playback starts.
 final class StreamController {
     let context: NSObject
     private var tap: ProcessTap?
@@ -89,6 +90,8 @@ final class StreamController {
     private var format: AVAudioFormat?
     private var output: RendererOutput?
     private var tappedPID: pid_t?
+    private var tapMuted = false
+    private var askedForSpeakers = false
 
     /// App the user wants streamed; nil = paused.
     private(set) var desiredApp: String?
@@ -96,6 +99,10 @@ final class StreamController {
 
     /// Called on the main thread when the pipeline starts or stops by itself.
     var onChange: (() -> Void)?
+
+    /// Called on the main thread when the app starts playing with no
+    /// speakers selected; once per stretch of playback.
+    var onNeedsSpeakers: (() -> Void)?
 
     /// Silence this long ends the stream; shorter gaps (track changes, brief
     /// pauses) keep the AirPlay session up.
@@ -129,13 +136,6 @@ final class StreamController {
             return
         }
 
-        // Without speakers there is nowhere to send the audio, so leave the
-        // app playing locally rather than muting it.
-        guard !ALContextOutputDevices(context).isEmpty else {
-            if isTapped { teardown(reason: "no speakers selected") }
-            return
-        }
-
         guard let app = findApp(named: appName), !app.isTerminated else {
             if isTapped { teardown(reason: "\(appName) quit") }
             return
@@ -150,11 +150,29 @@ final class StreamController {
             stopOutput(reason: "renderer failed: \(error)")
         }
 
+        // Without speakers there is nowhere to send the audio, so the app is
+        // left playing locally and the tap just listens for playback.
+        let hasSpeakers = !ALContextOutputDevices(context).isEmpty
+        if isTapped, tapMuted != hasSpeakers {
+            teardown(reason: hasSpeakers ? "speakers selected" : "no speakers selected")
+        }
+
         if !isTapped {
-            startTap(app: app)
+            startTap(app: app, mute: hasSpeakers)
         }
 
         guard let gate else { return }
+        guard hasSpeakers else {
+            if gate.isOpen, !askedForSpeakers {
+                askedForSpeakers = true
+                alog("\(appName) is playing with no speakers selected")
+                onNeedsSpeakers?()
+            } else if gate.isOpen, gate.silentSeconds > idleTimeout {
+                gate.close()
+                askedForSpeakers = false
+            }
+            return
+        }
         if gate.isOpen, output == nil {
             startOutput()
         } else if output != nil, gate.silentSeconds > idleTimeout {
@@ -162,13 +180,13 @@ final class StreamController {
         }
     }
 
-    private func startTap(app: NSRunningApplication) {
+    private func startTap(app: NSRunningApplication, mute: Bool) {
         do {
             // Not registered with coreaudiod yet; the process-list listener
             // re-ticks as soon as it is.
             guard let processObject = try AudioObjectID.processObject(for: app.processIdentifier) else { return }
             let tap = ProcessTap(processObject: processObject)
-            try tap.start(mute: true)
+            try tap.start(mute: mute)
             guard let format = tap.tapFormat, format.isInterleaved,
                   format.commonFormat == .pcmFormatFloat32 else {
                 tap.stop()
@@ -194,8 +212,9 @@ final class StreamController {
             self.gate = gate
             self.format = format
             tappedPID = app.processIdentifier
+            tapMuted = mute
             lastError = nil
-            alog("tap up: \(app.localizedName ?? "?") pid=\(app.processIdentifier) format=\(format)")
+            alog("tap up (\(mute ? "muting" : "listening")): \(app.localizedName ?? "?") pid=\(app.processIdentifier) format=\(format)")
         } catch {
             lastError = "\(error)"
             alog("tap start failed: \(error)")
@@ -240,13 +259,15 @@ final class StreamController {
         ring = nil
         format = nil
         tappedPID = nil
+        askedForSpeakers = false
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, AVRoutePickerViewDelegate {
     private var statusItem: NSStatusItem!
     private var pickerWindow: NSWindow?
     private var picker: AVRoutePickerView?
+    private var pickerIsPresentingRoutes = false
     private var controller: StreamController!
     private var menuTimer: Timer?
 
@@ -292,6 +313,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         alog("context \(context) id=\(ALContextID(context) ?? "nil")")
         controller = StreamController(context: context)
         controller.onChange = { [weak self] in self?.refreshMenu() }
+        controller.onNeedsSpeakers = { [weak self] in self?.openPicker() }
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         streamingIcon?.isTemplate = true
@@ -348,12 +370,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         controller.setDesired(app: selectedApp)
         refreshMenu()
 
-        // Routes can't be restored programmatically (selecting devices needs
-        // an Apple-only entitlement), so ask for speakers up front.
-        if controller.routedDeviceNames.isEmpty {
-            openPicker()
-        }
-
         // Remote control for scripting/testing: `airlift ctl start|stop [app]`.
         let center = DistributedNotificationCenter.default()
         center.addObserver(forName: .init("dev.garms.airlift.start"), object: nil, queue: .main) { [weak self] note in
@@ -398,6 +414,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func reconcile() {
         controller.tick()
         refreshMenu()
+        closePickerIfDone()
+    }
+
+    func routePickerViewWillBeginPresentingRoutes(_ routePickerView: AVRoutePickerView) {
+        pickerIsPresentingRoutes = true
+    }
+
+    func routePickerViewDidEndPresentingRoutes(_ routePickerView: AVRoutePickerView) {
+        pickerIsPresentingRoutes = false
+        closePickerIfDone()
+    }
+
+    /// Dismisses the picker window once the speaker list has been closed
+    /// with speakers chosen.
+    private func closePickerIfDone() {
+        guard let pickerWindow, pickerWindow.isVisible, !pickerIsPresentingRoutes,
+              !controller.routedDeviceNames.isEmpty else { return }
+        pickerWindow.close()
     }
 
     private func refreshMenu() {
@@ -433,6 +467,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if pickerWindow == nil {
             let picker = AVRoutePickerView(frame: NSRect(x: 0, y: 0, width: 60, height: 60))
             picker.isRoutePickerButtonBordered = true
+            picker.delegate = self
             if let contextID = ALContextID(controller.context) {
                 let attached = ALPickerSetOutputContextID(picker, contextID)
                 alog("picker attached to context: \(attached)")
