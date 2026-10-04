@@ -196,7 +196,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         controller = StreamController(context: context)
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.title = "♪⇄"
+        let menuIcon = NSImage(systemSymbolName: "airplayaudio", accessibilityDescription: "Airlift")
+        menuIcon?.isTemplate = true
+        statusItem.button?.image = menuIcon
+        statusItem.button?.imagePosition = .imageLeading
         statusItem.button?.toolTip = "Airlift"
 
         let menu = NSMenu()
@@ -276,7 +279,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             stateInfoItem.title = "Idle"
         }
         toggleItem.title = controller.desiredApp == nil ? "Start Streaming \(selectedApp)" : "Stop Streaming"
-        statusItem.button?.title = controller.isStreaming ? "♪⇄̇" : "♪⇄"
+        statusItem.button?.title = controller.isStreaming ? " •" : ""
     }
 
     @objc private func openPicker() {

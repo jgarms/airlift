@@ -34,7 +34,7 @@ Scripts/make-app.sh     # swift build + wraps build/Airlift.app (ad-hoc signed)
 open build/Airlift.app
 ```
 
-Menu bar (♪⇄): **Choose Speakers…** opens the native AirPlay picker
+Menu bar (AirPlay icon, with a dot while streaming): **Choose Speakers…** opens the native AirPlay picker
 (AirPlay 2 speakers multi-select), **Stream From** picks the source app,
 **Start Streaming** taps it. Approve the Local Network and audio-capture
 permission prompts on first use.
@@ -70,3 +70,6 @@ Logs: `~/Library/Logs/airlift.log`.
   (hand-rolled `init` msgSends are incompatible with ARC bookkeeping).
 - `Scripts/make-app.sh` — app-bundle wrapper (bundle identity is what makes
   TCC's Local Network permission work).
+- `Resources/Airlift.icns` — app icon. To regenerate after editing the artwork,
+  run `swift Scripts/make-icon.swift` followed by
+  `iconutil -c icns build/Airlift.iconset -o Resources/Airlift.icns`.

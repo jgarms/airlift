@@ -8,9 +8,10 @@ swift build
 
 APP=build/Airlift.app
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 cp .build/debug/airlift "$APP/Contents/MacOS/Airlift"
+cp Resources/Airlift.icns "$APP/Contents/Resources/Airlift.icns"
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -22,6 +23,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleName</key>
     <string>Airlift</string>
     <key>CFBundleExecutable</key>
+    <string>Airlift</string>
+    <key>CFBundleIconFile</key>
     <string>Airlift</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
