@@ -78,6 +78,19 @@ Logs: `~/Library/Logs/airlift.log`.
   Airlift asks again the next time the source app plays.
 - Expect ~2 s of AirPlay latency; source-app volume applies upstream of the
   stream, per-speaker volume via the picker/Home app.
+- While streaming Spotify, the menu bar app reads its current track locally
+  every 2 s and publishes title, artist, album, and artwork to Now Playing.
+  Approve the macOS Automation prompt to let Airlift read Spotify; no Spotify
+  account login or Web API setup is needed. Artwork downloads from the URL
+  Spotify supplies. Track progress and remote playback commands are not yet
+  implemented. If metadata is unavailable (or another app is selected), it
+  falls back to **Spotify via Airlift** (or that app's name), with the Mac's
+  name underneath. Metadata clears when streaming ends, including the usual
+  30 s silence timeout. Metadata delivery to HomePod and Apple Watch has
+  been verified during streaming.
+  The menu also shows **Title — Artist** on a separate line while Spotify
+  metadata is available; long titles are shortened with the full text in a
+  tooltip.
 
 ## Layout
 

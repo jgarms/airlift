@@ -45,6 +45,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     </array>
     <key>NSAudioCaptureUsageDescription</key>
     <string>Airlift captures another app's audio to stream it to your speakers.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Airlift reads Spotify's current track to show its title, artist, and artwork on your speakers.</string>
 </dict>
 </plist>
 PLIST

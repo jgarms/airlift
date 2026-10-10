@@ -4,6 +4,7 @@ import AppKit
 import AVKit
 import CoreAudio
 import Foundation
+import MediaPlayer
 import ServiceManagement
 
 let logURL = FileManager.default.homeDirectoryForCurrentUser
@@ -92,6 +93,8 @@ final class StreamController {
     private var tappedPID: pid_t?
     private var tapMuted = false
     private var askedForSpeakers = false
+    private var publishedSource: String?
+    private let spotifyMetadata = SpotifyMetadata()
 
     /// App the user wants streamed; nil = paused.
     private(set) var desiredApp: String?
@@ -110,10 +113,12 @@ final class StreamController {
 
     init(context: NSObject) {
         self.context = context
+        spotifyMetadata.onChange = { [weak self] in self?.onChange?() }
     }
 
     var isTapped: Bool { tap != nil }
     var isStreaming: Bool { output != nil }
+    var trackSummary: String? { isStreaming ? spotifyMetadata.trackSummary : nil }
 
     var routedDeviceNames: [String] {
         ALContextOutputDevices(context).compactMap {
@@ -123,6 +128,7 @@ final class StreamController {
 
     func setDesired(app: String?) {
         desiredApp = app
+        if isStreaming, let app { publishNowPlaying(source: app) }
         lastError = nil
         alog(app.map { "auto-streaming \($0)" } ?? "paused by user")
         tick()
@@ -233,6 +239,7 @@ final class StreamController {
                 lastError = nil
             }
             self.output = output
+            publishNowPlaying(source: desiredApp ?? "Audio")
             alog("streaming to \(routedDeviceNames.joined(separator: " + "))")
         } catch {
             lastError = "\(error)"
@@ -245,6 +252,7 @@ final class StreamController {
         alog("streaming stopped: \(reason)")
         output.stop()
         self.output = nil
+        clearNowPlaying()
         gate?.close()
         onChange?()
     }
@@ -255,11 +263,49 @@ final class StreamController {
         tap = nil
         output?.stop()
         output = nil
+        clearNowPlaying()
         gate = nil
         ring = nil
         format = nil
         tappedPID = nil
         askedForSpeakers = false
+    }
+
+    /// Start with a static label, then replace it with Spotify track metadata.
+    private func publishNowPlaying(source: String) {
+        guard publishedSource != source else { return }
+        spotifyMetadata.stop()
+        publishedSource = source
+        publishStaticNowPlaying(source: source)
+        if findApp(named: source)?.bundleIdentifier == "com.spotify.client" {
+            spotifyMetadata.start { [weak self] in
+                guard self?.publishedSource == source else { return }
+                self?.publishStaticNowPlaying(source: source)
+            }
+        }
+    }
+
+    private func publishStaticNowPlaying(source: String) {
+        let center = MPNowPlayingInfoCenter.default()
+        center.nowPlayingInfo = [
+            MPMediaItemPropertyTitle: "\(source) via Airlift",
+            MPMediaItemPropertyArtist: Host.current().localizedName ?? "Mac",
+            MPNowPlayingInfoPropertyIsLiveStream: true,
+            MPNowPlayingInfoPropertyMediaType: MPNowPlayingInfoMediaType.audio.rawValue,
+            MPNowPlayingInfoPropertyPlaybackRate: 1.0,
+        ]
+        center.playbackState = .playing
+        alog("Now Playing published: \(source) via Airlift")
+    }
+
+    private func clearNowPlaying() {
+        spotifyMetadata.stop()
+        guard publishedSource != nil else { return }
+        let center = MPNowPlayingInfoCenter.default()
+        center.playbackState = .stopped
+        center.nowPlayingInfo = nil
+        publishedSource = nil
+        alog("Now Playing cleared")
     }
 }
 
@@ -268,11 +314,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, AVRout
     private var pickerWindow: NSWindow?
     private var picker: AVRoutePickerView?
     private var pickerIsPresentingRoutes = false
+    private var pickerHasPresentedRoutes = false
+    private var pickerOpenTimer: Timer?
     private var controller: StreamController!
     private var menuTimer: Timer?
 
     private let routeInfoItem = NSMenuItem(title: "Speakers: none", action: nil, keyEquivalent: "")
     private let stateInfoItem = NSMenuItem(title: "Idle", action: nil, keyEquivalent: "")
+    private let trackInfoItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let toggleItem = NSMenuItem(title: "Pause Airlift", action: #selector(toggleStreaming), keyEquivalent: "p")
     private let loginItem = NSMenuItem(title: "Launch at Login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
     private let sourceMenu = NSMenu(title: "Stream From")
@@ -322,10 +371,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, AVRout
         statusItem.button?.toolTip = "Airlift"
 
         let menu = NSMenu()
+        menu.delegate = self
         routeInfoItem.isEnabled = false
         stateInfoItem.isEnabled = false
+        trackInfoItem.isEnabled = false
+        trackInfoItem.isHidden = true
         menu.addItem(routeInfoItem)
         menu.addItem(stateInfoItem)
+        menu.addItem(trackInfoItem)
         menu.addItem(.separator())
         menu.addItem(withTitle: "Choose Speakers…", action: #selector(openPicker), keyEquivalent: "s").target = self
         toggleItem.target = self
@@ -389,6 +442,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, AVRout
 
     // Rebuilds the "Stream From" submenu each time it opens.
     func menuNeedsUpdate(_ menu: NSMenu) {
+        if menu === statusItem.menu {
+            refreshMenu()
+            return
+        }
         guard menu === sourceMenu else { return }
         menu.removeAllItems()
         let apps = NSWorkspace.shared.runningApplications
@@ -418,19 +475,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, AVRout
     }
 
     func routePickerViewWillBeginPresentingRoutes(_ routePickerView: AVRoutePickerView) {
+        pickerHasPresentedRoutes = true
         pickerIsPresentingRoutes = true
+        alog("speaker list opened")
     }
 
     func routePickerViewDidEndPresentingRoutes(_ routePickerView: AVRoutePickerView) {
         pickerIsPresentingRoutes = false
+        alog("speaker list dismissed")
         closePickerIfDone()
     }
 
     /// Dismisses the picker window once the speaker list has been closed
     /// with speakers chosen.
     private func closePickerIfDone() {
-        guard let pickerWindow, pickerWindow.isVisible, !pickerIsPresentingRoutes,
+        guard let pickerWindow, pickerWindow.isVisible, pickerHasPresentedRoutes,
+              !pickerIsPresentingRoutes,
               !controller.routedDeviceNames.isEmpty else { return }
+        pickerHasPresentedRoutes = false
         pickerWindow.close()
     }
 
@@ -438,6 +500,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, AVRout
         let names = controller.routedDeviceNames
         let app = controller.desiredApp ?? selectedApp
         routeInfoItem.title = names.isEmpty ? "Speakers: none" : "Speakers: \(names.joined(separator: " + "))"
+        let summary = controller.trackSummary
+        // Keep unusually long titles from making the entire menu too wide.
+        let singleLine = summary?.split(whereSeparator: { $0.isNewline }).joined(separator: " ")
+        trackInfoItem.title = singleLine.map { $0.count > 90 ? String($0.prefix(89)) + "…" : $0 } ?? ""
+        trackInfoItem.toolTip = summary
+        trackInfoItem.isHidden = summary == nil
 
         var needsAttention = false
         if controller.desiredApp == nil {
@@ -464,6 +532,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, AVRout
     }
 
     @objc private func openPicker() {
+        // Repeated menu clicks must not toggle an already-presented list shut.
+        if pickerIsPresentingRoutes {
+            pickerWindow?.makeKeyAndOrderFront(nil)
+            return
+        }
+        pickerOpenTimer?.invalidate()
+        pickerHasPresentedRoutes = false
+        alog("opening speaker picker")
         if pickerWindow == nil {
             let picker = AVRoutePickerView(frame: NSRect(x: 0, y: 0, width: 60, height: 60))
             picker.isRoutePickerButtonBordered = true
@@ -500,8 +576,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, AVRout
         pickerWindow?.makeKeyAndOrderFront(nil)
         // Go straight to the speaker list instead of making the user click
         // the AirPlay button first.
-        Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self] _ in
-            _ = self?.picker?.accessibilityPerformPress()
+        pickerOpenTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self] _ in
+            guard let self, self.pickerWindow?.isVisible == true,
+                  !self.pickerIsPresentingRoutes else { return }
+            self.pickerOpenTimer = nil
+            let pressed = self.picker?.accessibilityPerformPress() ?? false
+            alog("speaker picker automatic press: \(pressed)")
         }
     }
 
